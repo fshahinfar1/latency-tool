@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <string.h>
+#include <time.h>
 
 #include <arpa/inet.h>
 #include <linux/in.h>
@@ -22,10 +24,12 @@
 #include <assert.h>
 
 
-#define TIMESTAMP_SIZE 8
+typedef unsigned long long int timestamp;
+#define TIMESTAMP_SIZE sizeof(timestamp)
 #define MINIMUM_PAYLOAD_SIZE (2 + TIMESTAMP_SIZE)
 #define HEADER 0x11
 #define TRAILER 0xFF
+#define MAX_MEASUREMENTS 1000000000LL
 
 enum parser_state {
 	LOOKING_FOR_HEADER,
@@ -55,20 +59,49 @@ int set_sock_opt(int sk_fd)
 	return 0;
 }
 
+static int sk_fd;
+static int run;
+void handle_interrupt(int sig)
+{
+	run = 0;
+	close(sk_fd);
+}
+
+static timestamp get_ns()
+{
+	int ret;
+	struct timespec ts;
+	ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	assert(ret == 0);
+	return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
 int main(int argc, char *argv[])
 {
+	signal(SIGINT, handle_interrupt);
+	signal(SIGTERM, handle_interrupt);
 
-	char *target_ip = "192.168.1.1";
-	short target_port = 8008;
-	int window_size = 32;
-	int msg_size = 500;
+	/* TODO: get these values from CLI */
+	char *target_ip = "192.168.1.2";
+	short target_port = 8080;
+	int window_size = 1;
+	int msg_size = 30;
+	/* warm up time in nanosecond */
+	timestamp warm_up = 1000000000LL;
 
-	enum parser_state state;
+	size_t measurement_index = 0;
+	timestamp *measurements = malloc(MAX_MEASUREMENTS);
+
+	enum parser_state state = LOOKING_FOR_HEADER;
 	int ret;
-	int sk_fd;
-	char *msg, *recv_buf;
+	unsigned char *msg, *recv_buf;
 	struct sockaddr_in sk_addr;
-	socklen_t sk_size = sizeof(sk_addr);
+
+	run = 1;
+	const timestamp start_ts = get_ns();
+
+	sk_addr.sin_family = AF_INET;
+	sk_addr.sin_port = htons(target_port);
 	inet_pton(AF_INET, target_ip, &(sk_addr.sin_addr));
 
 	sk_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -85,7 +118,7 @@ int main(int argc, char *argv[])
 
 	memset(msg, 0xAB, msg_size);
 	msg[0] = HEADER;
-	(uint64_t *)(&msg[1]) = get_ns();
+	*(timestamp *)(&msg[1]) = start_ts;
 	msg[msg_size - 1] = TRAILER;
 
 	for (int i = 0; i < window_size; i++) {
@@ -96,11 +129,17 @@ int main(int argc, char *argv[])
 		assert(ret == msg_size);
 	}
 
-	int ts_byte_count;
-	long long int recv_ts;
-	while (true) {
+	unsigned int ts_byte_count = 0;
+	timestamp recv_ts = 0;
+	timestamp now = 0;
+	timestamp lat = 0;
+	while (run) {
 		ret = recv(sk_fd, recv_buf, msg_size, 0);
-		assert(ret >= 0);
+		if (ret < 0) {
+			run = 0;
+			break;
+		}
+		/* printf("recv something\n"); */
 		for (int i = 0; i < ret; i++) {
 			switch(state) {
 				case LOOKING_FOR_HEADER:
@@ -108,29 +147,64 @@ int main(int argc, char *argv[])
 						state = WAITING_FOR_TIMESTAMP;
 						ts_byte_count = 0;
 						recv_ts = 0;
+						/* printf("found header\n"); */
 					} else {
 						/* Unexpected value ! */
 					}
 					break;
 				case WAITING_FOR_TIMESTAMP:
-					recv_ts = recv_ts << 1;
-					recv_ts = recv_ts | recv_buf[i];
+					/* recv_ts = recv_ts << 8; */
+					recv_ts = recv_ts | (timestamp)(recv_buf[i] << (8 * ts_byte_count));
 					ts_byte_count += 1;
 					if (ts_byte_count == TIMESTAMP_SIZE) {
 						state = LOOKING_FOR_TRAILER;
+						/* printf("found ts (%lld - %d bytes)\n", recv_ts, ts_byte_count); */
 					}
 					break;
 				case LOOKING_FOR_TRAILER:
+					/* printf("%x\n", (unsigned int)recv_buf[i]); */
 					if (recv_buf[i] == TRAILER) {
+						/* printf("found trailer\n"); */
 						/* end of a round trip */
 						state = LOOKING_FOR_HEADER;
+						now = get_ns();
+						if (now  >= start_ts + warm_up) {
+							lat = now - recv_ts;
+							printf("lat: %llu (%llu - %llu)\n", lat, now, recv_ts);
+							measurements[measurement_index++] = lat;
+							if (measurement_index >= MAX_MEASUREMENTS) {
+								fprintf(stderr, "Maximum number of measurements reached\n");
+								run = 0;
+								break;
+							}
+						}
+						/* send a new requst */
+						*(timestamp *)(&msg[1]) = get_ns();
+						ret = send(sk_fd, msg, msg_size, 0);
+						assert(ret == msg_size);
+					} else {
+						/* It should be the body of the response */
 					}
 					break;
 				default:
+					assert(0);
 					break;
 			}
-			if (recv_buf[i
 		}
 	}
+	close(sk_fd);
+
+	/* Report the results */
+	char file_path[255];
+	snprintf(file_path, 254, "/tmp/pp_client_lat_%lld.txt", get_ns());
+	int outfile_fd = open(file_path,
+			O_CREAT | O_RDWR,
+			S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH | S_IRGRP | S_IWGRP);
+	assert(outfile_fd >= 0);
+	for (size_t i = 0; i < measurement_index; i++) {
+		dprintf(outfile_fd, "%lld\n", measurements[i]);
+	}
+	close(outfile_fd);
+	printf("Done!\n");
 	return 0;
 }
