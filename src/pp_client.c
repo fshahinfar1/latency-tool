@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
 	/* TODO: get these values from CLI */
 	char *target_ip = "192.168.1.2";
 	short target_port = 8080;
-	int window_size = 1;
+	int window_size = 4;
 	int msg_size = 30;
 	/* warm up time in nanosecond */
 	timestamp warm_up = 1000000000LL;
@@ -99,6 +99,9 @@ int main(int argc, char *argv[])
 
 	run = 1;
 	const timestamp start_ts = get_ns();
+
+	size_t send_count = 0;
+	timestamp prev_tp_report = 0;
 
 	sk_addr.sin_family = AF_INET;
 	sk_addr.sin_port = htons(target_port);
@@ -128,6 +131,7 @@ int main(int argc, char *argv[])
 		 * */
 		assert(ret == msg_size);
 	}
+	send_count += window_size;
 
 	unsigned int ts_byte_count = 0;
 	unsigned char recv_ts[TIMESTAMP_SIZE] = {};
@@ -139,6 +143,7 @@ int main(int argc, char *argv[])
 			run = 0;
 			break;
 		}
+		now = get_ns();
 		/* printf("recv something\n"); */
 		for (int i = 0; i < ret; i++) {
 			switch(state) {
@@ -166,7 +171,6 @@ int main(int argc, char *argv[])
 						/* printf("found trailer\n"); */
 						/* end of a round trip */
 						state = LOOKING_FOR_HEADER;
-						now = get_ns();
 						if (now  >= start_ts + warm_up) {
 							lat = now - *(timestamp *)recv_ts;
 							/* printf("lat: %llu (%llu - %llu)\n", lat, now, *(timestamp *)recv_ts); */
@@ -186,7 +190,9 @@ int main(int argc, char *argv[])
 						}
 						if (ret != msg_size) {
 							fprintf(stderr, "Unexpected: failed to send whole message!\n");
+							return 1;
 						}
+						send_count += 1;
 					} else {
 						/* It should be the body of the response */
 					}
@@ -195,6 +201,14 @@ int main(int argc, char *argv[])
 					assert(0);
 					break;
 			}
+		}
+
+		double delta = now - prev_tp_report;
+		if (delta > 2000000000L) {
+			delta *= 0.000000001;
+			prev_tp_report = now;
+			printf("send: %f\n", send_count / delta);
+			send_count = 0;
 		}
 	}
 	close(sk_fd);
