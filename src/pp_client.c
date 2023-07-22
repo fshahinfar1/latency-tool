@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <getopt.h>
 
 #include <arpa/inet.h>
 #include <linux/in.h>
@@ -36,6 +37,82 @@ enum parser_state {
 	WAITING_FOR_TIMESTAMP,
 	LOOKING_FOR_TRAILER,
 };
+
+struct params {
+	char *target_ip;
+	short target_port;
+	int window_size;
+	int msg_size;
+	timestamp warm_up;
+};
+
+static struct params args;
+
+void usage()
+{
+	printf("Usage: pp [Options] <ip> <port>\n"
+		"Options:\n"
+		"--msg-size -m: message size       (default: 500 byte)\n"
+		"--wnd-size -w: window size        (default: 1)\n"
+		"--warm-up    : warm up time   (default: 1 sec)\n"
+	);
+}
+
+int parse_args(int argc, char *argv[])
+{
+	int ret;
+	/* Default values */
+	args.msg_size = 500;
+	args.window_size = 1;
+	args.warm_up = 1000000000LL;
+	/* TODO: get these values from CLI */
+	args.target_ip = "192.168.1.2";
+	args.target_port = 8080;
+
+	enum opts {
+		HELP = 100,
+		MSG_SIZE,
+		WND_SIZE,
+		WARM_UP,
+	};
+	struct option long_opts[] = {
+		{"help", no_argument, NULL, HELP},
+		{"msg-size", required_argument, NULL, MSG_SIZE},
+		{"wnd-size", required_argument, NULL, WND_SIZE},
+		{"warm-up", required_argument, NULL, WARM_UP},
+		{NULL, 0, NULL, 0},
+	};
+	while (1) {
+		ret = getopt_long(argc, argv, "hm:w:", long_opts, NULL);
+		if (ret == -1)
+			break;
+		switch (ret) {
+			case MSG_SIZE:
+				args.msg_size = atoi(optarg);
+				break;
+			case WND_SIZE:
+				args.window_size = atoi(optarg);
+				break;
+			case WARM_UP:
+				args.warm_up = atol(optarg) * 1000000000L;
+				break;
+			case HELP:
+				usage();
+				exit(0);
+			default:
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+				break;
+		}
+	}
+	if (argc - optind < 2) {
+		usage(argv[0]);
+		exit(EXIT_FAILURE);
+	}
+	args.target_ip = strdup(argv[optind]);
+	args.target_port = atoi(argv[optind+1]);
+	return 0;
+}
 
 int set_sock_opt(int sk_fd)
 {
@@ -81,19 +158,16 @@ int main(int argc, char *argv[])
 	signal(SIGINT, handle_interrupt);
 	signal(SIGTERM, handle_interrupt);
 
-	/* TODO: get these values from CLI */
-	char *target_ip = "192.168.1.2";
-	short target_port = 8080;
-	int window_size = 4;
-	int msg_size = 30;
-	/* warm up time in nanosecond */
-	timestamp warm_up = 1000000000LL;
+	int ret;
+	ret = parse_args(argc, argv);
+	assert(ret == 0);
+	int msg_size = args.msg_size;
+	timestamp warm_up = args.warm_up;
 
 	size_t measurement_index = 0;
 	timestamp *measurements = malloc(MAX_MEASUREMENTS);
 
 	enum parser_state state = LOOKING_FOR_HEADER;
-	int ret;
 	unsigned char *msg, *recv_buf;
 	struct sockaddr_in sk_addr;
 
@@ -104,8 +178,8 @@ int main(int argc, char *argv[])
 	timestamp prev_tp_report = 0;
 
 	sk_addr.sin_family = AF_INET;
-	sk_addr.sin_port = htons(target_port);
-	inet_pton(AF_INET, target_ip, &(sk_addr.sin_addr));
+	sk_addr.sin_port = htons(args.target_port);
+	inet_pton(AF_INET, args.target_ip, &(sk_addr.sin_addr));
 
 	sk_fd = socket(AF_INET, SOCK_STREAM, 0);
 	assert(sk_fd >= 0);
@@ -124,14 +198,14 @@ int main(int argc, char *argv[])
 	*(timestamp *)(&msg[1]) = start_ts;
 	msg[msg_size - 1] = TRAILER;
 
-	for (int i = 0; i < window_size; i++) {
+	for (int i = 0; i < args.window_size; i++) {
 		ret = send(sk_fd, msg, msg_size, 0);
 		/* TODO: if less than the message size is sent, it means that I
 		 * need to retry to send the rest of the message.
 		 * */
 		assert(ret == msg_size);
 	}
-	send_count += window_size;
+	send_count += args.window_size;
 
 	unsigned int ts_byte_count = 0;
 	unsigned char recv_ts[TIMESTAMP_SIZE] = {};
