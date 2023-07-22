@@ -1,5 +1,6 @@
 CFLAGS = -g -O3 -Wall
-OUTPUT = pp
+OUTPUT = pp_client \
+		 pp_udp
 
 .PHONY: all clean
 
@@ -8,6 +9,6 @@ all: $(OUTPUT)
 clean:
 	rm $(OUTPUT)
 
-$(OUTPUT): %:%_client.c
+$(OUTPUT): %:%.c
 	$(CC) $(CFLAGS) $< -o $@
 

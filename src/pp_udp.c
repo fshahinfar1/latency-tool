@@ -129,10 +129,6 @@ int set_sock_opt(int sk_fd)
 	if (ret)
 		return ret;
 
-	ret = setsockopt(sk_fd, SOL_TCP, TCP_NODELAY, &opt_val, sizeof(opt_val));
-	if (ret)
-		return ret;
-
 	return 0;
 }
 
@@ -167,7 +163,6 @@ int main(int argc, char *argv[])
 	size_t measurement_index = 0;
 	timestamp *measurements = malloc(MAX_MEASUREMENTS);
 
-	enum parser_state state = LOOKING_FOR_HEADER;
 	unsigned char *msg, *recv_buf;
 	struct sockaddr_in sk_addr;
 
@@ -181,7 +176,7 @@ int main(int argc, char *argv[])
 	sk_addr.sin_port = htons(args.target_port);
 	inet_pton(AF_INET, args.target_ip, &(sk_addr.sin_addr));
 
-	sk_fd = socket(AF_INET, SOCK_STREAM, 0);
+	sk_fd = socket(AF_INET, SOCK_DGRAM, 0);
 	assert(sk_fd >= 0);
 	ret = set_sock_opt(sk_fd);
 	assert(ret == 0);
@@ -207,8 +202,7 @@ int main(int argc, char *argv[])
 	}
 	send_count += args.window_size;
 
-	unsigned int ts_byte_count = 0;
-	unsigned char recv_ts[TIMESTAMP_SIZE] = {};
+	timestamp recv_ts;
 	timestamp now = 0;
 	timestamp lat = 0;
 	while (run) {
@@ -217,65 +211,35 @@ int main(int argc, char *argv[])
 			run = 0;
 			break;
 		}
+		/* UDP is message oriented */
+		assert (ret == msg_size);
 		now = get_ns();
 		/* printf("recv something\n"); */
-		for (int i = 0; i < ret; i++) {
-			switch(state) {
-				case LOOKING_FOR_HEADER:
-					if (recv_buf[i] == HEADER) {
-						state = WAITING_FOR_TIMESTAMP;
-						ts_byte_count = 0;
-						*(timestamp *)recv_ts = 0;
-						/* printf("found header\n"); */
-					} else {
-						/* Unexpected value ! */
-					}
-					break;
-				case WAITING_FOR_TIMESTAMP:
-					recv_ts[ts_byte_count] = recv_buf[i];
-					ts_byte_count += 1;
-					if (ts_byte_count == TIMESTAMP_SIZE) {
-						state = LOOKING_FOR_TRAILER;
-						/* printf("found ts (%lld - %d bytes)\n", recv_ts, ts_byte_count); */
-					}
-					break;
-				case LOOKING_FOR_TRAILER:
-					/* printf("%x\n", (unsigned int)recv_buf[i]); */
-					if (recv_buf[i] == TRAILER) {
-						/* printf("found trailer\n"); */
-						/* end of a round trip */
-						state = LOOKING_FOR_HEADER;
-						if (now  >= start_ts + warm_up) {
-							lat = now - *(timestamp *)recv_ts;
-							/* printf("lat: %llu (%llu - %llu)\n", lat, now, *(timestamp *)recv_ts); */
-							measurements[measurement_index++] = lat;
-							if (measurement_index >= MAX_MEASUREMENTS) {
-								fprintf(stderr, "Maximum number of measurements reached\n");
-								run = 0;
-								break;
-							}
-						}
-						/* send a new requst */
-						*(timestamp *)(&msg[1]) = now;
-						ret = send(sk_fd, msg, msg_size, 0);
-						if (ret < 0) {
-							break;
-							run = 0;
-						}
-						if (ret != msg_size) {
-							fprintf(stderr, "Unexpected: failed to send whole message!\n");
-							return 1;
-						}
-						send_count += 1;
-					} else {
-						/* It should be the body of the response */
-					}
-					break;
-				default:
-					assert(0);
-					break;
+		recv_ts = *(timestamp *)&recv_buf[1];
+
+		/* end of a round trip */
+		if (now  >= start_ts + warm_up) {
+			lat = now - recv_ts;
+			/* printf("lat: %llu (%llu - %llu)\n", lat, now, recv_ts); */
+			measurements[measurement_index++] = lat;
+			if (measurement_index >= MAX_MEASUREMENTS) {
+				fprintf(stderr, "Maximum number of measurements reached\n");
+				run = 0;
+				break;
 			}
 		}
+		/* send a new requst */
+		*(timestamp *)(&msg[1]) = now;
+		ret = send(sk_fd, msg, msg_size, 0);
+		if (ret < 0) {
+			break;
+			run = 0;
+		}
+		if (ret != msg_size) {
+			fprintf(stderr, "Unexpected: failed to send whole message!\n");
+			return 1;
+		}
+		send_count += 1;
 
 		double delta = now - prev_tp_report;
 		if (delta > 2000000000L) {
@@ -289,7 +253,7 @@ int main(int argc, char *argv[])
 
 	/* Report the results */
 	char file_path[255];
-	snprintf(file_path, 254, "/tmp/pp_client_lat_%lld.txt", get_ns());
+	snprintf(file_path, 254, "/tmp/pp_udp_lat_%lld.txt", get_ns());
 	int outfile_fd = open(file_path,
 			O_CREAT | O_RDWR,
 			S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH | S_IRGRP | S_IWGRP);

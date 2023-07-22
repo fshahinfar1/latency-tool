@@ -1,3 +1,4 @@
-pp
+pp_client
+pp_udp
 tags
 *.o
