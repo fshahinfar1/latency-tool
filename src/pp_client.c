@@ -130,7 +130,7 @@ int main(int argc, char *argv[])
 	}
 
 	unsigned int ts_byte_count = 0;
-	timestamp recv_ts = 0;
+	unsigned char recv_ts[TIMESTAMP_SIZE] = {};
 	timestamp now = 0;
 	timestamp lat = 0;
 	while (run) {
@@ -146,15 +146,14 @@ int main(int argc, char *argv[])
 					if (recv_buf[i] == HEADER) {
 						state = WAITING_FOR_TIMESTAMP;
 						ts_byte_count = 0;
-						recv_ts = 0;
+						*(timestamp *)recv_ts = 0;
 						/* printf("found header\n"); */
 					} else {
 						/* Unexpected value ! */
 					}
 					break;
 				case WAITING_FOR_TIMESTAMP:
-					/* recv_ts = recv_ts << 8; */
-					recv_ts = recv_ts | (timestamp)(recv_buf[i] << (8 * ts_byte_count));
+					recv_ts[ts_byte_count] = recv_buf[i];
 					ts_byte_count += 1;
 					if (ts_byte_count == TIMESTAMP_SIZE) {
 						state = LOOKING_FOR_TRAILER;
@@ -169,8 +168,8 @@ int main(int argc, char *argv[])
 						state = LOOKING_FOR_HEADER;
 						now = get_ns();
 						if (now  >= start_ts + warm_up) {
-							lat = now - recv_ts;
-							printf("lat: %llu (%llu - %llu)\n", lat, now, recv_ts);
+							lat = now - *(timestamp *)recv_ts;
+							/* printf("lat: %llu (%llu - %llu)\n", lat, now, *(timestamp *)recv_ts); */
 							measurements[measurement_index++] = lat;
 							if (measurement_index >= MAX_MEASUREMENTS) {
 								fprintf(stderr, "Maximum number of measurements reached\n");
@@ -181,7 +180,13 @@ int main(int argc, char *argv[])
 						/* send a new requst */
 						*(timestamp *)(&msg[1]) = get_ns();
 						ret = send(sk_fd, msg, msg_size, 0);
-						assert(ret == msg_size);
+						if (ret < 0) {
+							break;
+							run = 0;
+						}
+						if (ret != msg_size) {
+							fprintf(stderr, "Unexpected: failed to send whole message!\n");
+						}
 					} else {
 						/* It should be the body of the response */
 					}
@@ -205,6 +210,7 @@ int main(int argc, char *argv[])
 		dprintf(outfile_fd, "%lld\n", measurements[i]);
 	}
 	close(outfile_fd);
+	printf("output file: %s\n", file_path);
 	printf("Done!\n");
 	return 0;
 }
