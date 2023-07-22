@@ -165,6 +165,7 @@ int main(int argc, char *argv[])
 
 	unsigned char *msg, *recv_buf;
 	struct sockaddr_in sk_addr;
+	/* struct sockaddr_in src_addr; */
 
 	run = 1;
 	const timestamp start_ts = get_ns();
@@ -206,6 +207,7 @@ int main(int argc, char *argv[])
 	timestamp now = 0;
 	timestamp lat = 0;
 	while (run) {
+		/* ret = recvfrom(sk_fd, recv_buf, msg_size, 0, &src_addr, sizeof(src_addr)); */
 		ret = recv(sk_fd, recv_buf, msg_size, 0);
 		if (ret < 0) {
 			run = 0;
